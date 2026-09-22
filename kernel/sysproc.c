@@ -36,6 +36,17 @@ sys_wait(void)
   return kwait(p);
 }
 
+// returns child process status and rusage
+uint64
+sys_wait2(void)
+{
+  uint64 p;
+  uint64 rusage_p;
+  argaddr(0, &p);
+  argaddr(1, &rusage_p);
+  return kwait2(p, rusage_p);
+}
+
 uint64
 sys_sbrk(void)
 {
@@ -110,3 +121,4 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
