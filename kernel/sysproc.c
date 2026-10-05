@@ -7,6 +7,10 @@
 #include "proc.h"
 #include "vm.h"
 
+
+extern struct proc proc[NPROC];
+
+
 uint64
 sys_exit(void)
 {
@@ -122,3 +126,42 @@ sys_uptime(void)
   return xticks;
 }
 
+
+uint64
+sys_getprocs(void)
+{
+  uint64 dst_uproc;
+  struct proc *p;
+  struct pstat kproc;
+  int count = 0;
+
+  argaddr(0, &dst_uproc);
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      kproc.pid = p->pid;
+      kproc.state = p->state;
+      kproc.size = p->sz;
+      if(p->parent)
+        kproc.ppid = p->parent->pid;
+      else
+        kproc.ppid = 0;
+      safestrcpy(kproc.name, p->name, sizeof(kproc.name));
+      release(&p->lock);
+
+      // copyout(pagetable, psz, dstva, src, len)
+      if(copyout(myproc()->pagetable,
+                 myproc()->sz,
+                 dst_uproc + count * sizeof(struct pstat),
+                 (char *)&kproc,
+                 sizeof(struct pstat)) < 0) {
+        return -1;
+      }
+      count++;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return count;
+}

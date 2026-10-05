@@ -3,6 +3,9 @@
 struct stat;
 struct rusage;
 
+struct pstat;
+int getprocs(struct pstat*);
+
 // system calls
 int fork(void);
 int exit(int) __attribute__((noreturn));
