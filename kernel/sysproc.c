@@ -143,6 +143,7 @@ sys_getprocs(void)
       kproc.pid = p->pid;
       kproc.state = p->state;
       kproc.size = p->sz;
+      kproc.priority = p->priority;
       if(p->parent)
         kproc.ppid = p->parent->pid;
       else
@@ -150,7 +151,6 @@ sys_getprocs(void)
       safestrcpy(kproc.name, p->name, sizeof(kproc.name));
       release(&p->lock);
 
-      // copyout(pagetable, psz, dstva, src, len)
       if(copyout(myproc()->pagetable,
                  myproc()->sz,
                  dst_uproc + count * sizeof(struct pstat),
@@ -164,4 +164,31 @@ sys_getprocs(void)
     }
   }
   return count;
+}
+
+uint64
+sys_getpriority(void)
+{
+  struct proc *p = myproc();
+  int prio;
+  acquire(&p->lock);
+  prio = p->priority;
+  release(&p->lock);
+  return prio;
+}
+
+uint64
+sys_setpriority(void)
+{
+  int prio;
+  struct proc *p = myproc();
+
+  argint(0, &prio);
+  if(prio < 0 || prio > 49)
+    return -1;
+
+  acquire(&p->lock);
+  p->priority = prio;
+  release(&p->lock);
+  return 0;
 }

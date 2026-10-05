@@ -125,7 +125,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-  p->cputime = 0; //Initialize to 0 when the process is created
+  p->priority = 0; //Initialize to 0 when the process is created
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -290,6 +290,7 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  np->priority = p->priority; //inherit parent's priority
 
   pid = np->pid;
 
@@ -764,4 +765,42 @@ procdump(void)
     printk("%d %s %s", p->pid, state, p->name);
     printk("\n");
   }
+}
+
+// Return count of active processes and populate the user array of struct pstat
+int
+getprocs(uint64 dst_uproc)
+{
+  struct proc *p;
+  struct pstat kproc;
+  int count = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      kproc.pid = p->pid;
+      kproc.state = p->state;
+      kproc.size = p->sz;
+      if(p->parent)
+        kproc.ppid = p->parent->pid;
+      else
+        kproc.ppid = 0;
+      safestrcpy(kproc.name, p->name, sizeof(kproc.name));
+
+      release(&p->lock);
+
+      // Copy kproc into user space using the 5-argument copyout
+      if(copyout(myproc()->pagetable, 
+                 dst_uproc + count * sizeof(struct pstat), 
+                 sizeof(struct pstat), 
+                 (char *)&kproc, 
+                 sizeof(struct pstat)) < 0) {
+        return -1;
+      }
+      count++;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return count;
 }
