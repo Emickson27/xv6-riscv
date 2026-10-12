@@ -144,6 +144,7 @@ sys_getprocs(void)
       kproc.state = p->state;
       kproc.size = p->sz;
       kproc.priority = p->priority;
+      kproc.readytime = p->readytime;
       if(p->parent)
         kproc.ppid = p->parent->pid;
       else

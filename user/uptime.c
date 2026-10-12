@@ -5,7 +5,7 @@
 int
 main(int argc, char *argv[])
 {
-  int ticks = uptime();
+  int ticks = uptime();//trigger system call into kernel
   printf("up %d clock ticks\n", ticks);
   exit(0);
 }

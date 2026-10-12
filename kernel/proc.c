@@ -126,7 +126,7 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->priority = 0; //Initialize to 0 when the process is created
-
+  p->readytime =0;
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     freeproc(p);
@@ -227,6 +227,10 @@ userinit(void)
 
   p->cwd = namei("/");
 
+  acquire(&tickslock);
+  p->readytime = ticks;
+  release(&tickslock);
+
   p->state = RUNNABLE;
 
   release(&p->lock);
@@ -290,7 +294,7 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
-  np->priority = p->priority; //inherit parent's priority
+  np->priority = p->priority; // inherit parent's priority[cite: 1]
 
   pid = np->pid;
 
@@ -301,13 +305,16 @@ kfork(void)
   release(&wait_lock);
 
   acquire(&np->lock);
+  acquire(&tickslock);
+  np->readytime = ticks;
+  release(&tickslock);
   np->state = RUNNABLE;
   release(&np->lock);
 
   return pid;
 }
 
-// Pass p's abandoned children to init.
+//Pass p's abandoned children to init.
 // Caller must hold wait_lock.
 void
 reparent(struct proc *p)
@@ -569,6 +576,9 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  acquire(&tickslock);
+  p->readytime = ticks;
+  release(&tickslock);
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -655,6 +665,9 @@ wakeup(void *chan)
       // If this waiting process has gotten so far as to actually
       // go to sleep, also set it back to RUNNING.
       if (p->state == SLEEPING) {
+        acquire(&tickslock);
+        p->readytime = ticks;
+        release(&tickslock);
         p->state = RUNNABLE;
       }
     }
