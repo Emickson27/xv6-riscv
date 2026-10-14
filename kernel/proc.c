@@ -7,6 +7,9 @@
 #include "defs.h"
 #include "pstat.h"
 
+#define AGING_TICKS 50
+#define MAX_PRIO 49
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -510,39 +513,52 @@ scheduler(void)
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
-    int max_priority = -1;
+    int max_effective_prio = -1;
     struct proc *best_p = 0;
+    uint current_ticks = ticks;
 
-    // Pass 1: Find the highest priority among all RUNNABLE processes
+    // Pass 1: Find the maximum effective priority among all RUNNABLE processes
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        if(p->priority > max_priority) {
-          max_priority = p->priority;
+        int age = current_ticks - p->readytime;
+        int effective_prio = p->priority + (age / AGING_TICKS);
+        if(effective_prio > MAX_PRIO)
+          effective_prio = MAX_PRIO;
+
+        if(effective_prio > max_effective_prio) {
+          max_effective_prio = effective_prio;
         }
       }
       release(&p->lock);
     }
 
-    // Pass 2: Select the first RUNNABLE process with that maximum priority
-    if(max_priority != -1) {
+    // Pass 2: Select the first RUNNABLE process matching the max effective priority
+    if(max_effective_prio != -1) {
       for(p = proc; p < &proc[NPROC]; p++) {
         acquire(&p->lock);
-        if(p->state == RUNNABLE && p->priority == max_priority) {
-          best_p = p;
-          // Keep p->lock held to switch into it
-          break;
+        if(p->state == RUNNABLE) {
+          int age = current_ticks - p->readytime;
+          int effective_prio = p->priority + (age / AGING_TICKS);
+          if(effective_prio > MAX_PRIO)
+            effective_prio = MAX_PRIO;
+
+          if(effective_prio == max_effective_prio) {
+            best_p = p;
+            break; // Keep best_p->lock held to switch
+          }
         }
         release(&p->lock);
       }
     }
 
+    // Switch to the chosen process
     if(best_p) {
       best_p->state = RUNNING;
       c->proc = best_p;
       swtch(&c->context, &best_p->context);
 
-      // Process is done running for now.
+      // Process has yielded, blocked, or finished
       c->proc = 0;
       release(&best_p->lock);
     } else {
