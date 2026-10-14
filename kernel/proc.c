@@ -504,44 +504,54 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-
+  
   c->proc = 0;
-  for (;;) {
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+  for(;;){
+    // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-    intr_off();
 
-    int found = 0;
-    for (p = proc; p < &proc[NPROC]; p++) {
+    int max_priority = -1;
+    struct proc *best_p = 0;
+
+    // Pass 1: Find the highest priority among all RUNNABLE processes
+    for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Don't re-enable interrupts on release.
-        mycpu()->intena = 0;
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if(p->state == RUNNABLE) {
+        if(p->priority > max_priority) {
+          max_priority = p->priority;
+        }
       }
       release(&p->lock);
     }
-    if (found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+
+    // Pass 2: Select the first RUNNABLE process with that maximum priority
+    if(max_priority != -1) {
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == max_priority) {
+          best_p = p;
+          // Keep p->lock held to switch into it
+          break;
+        }
+        release(&p->lock);
+      }
+    }
+
+    if(best_p) {
+      best_p->state = RUNNING;
+      c->proc = best_p;
+      swtch(&c->context, &best_p->context);
+
+      // Process is done running for now.
+      c->proc = 0;
+      release(&best_p->lock);
+    } else {
+      intr_on();
       asm volatile("wfi");
     }
   }
 }
+
 
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
@@ -665,9 +675,9 @@ wakeup(void *chan)
       // If this waiting process has gotten so far as to actually
       // go to sleep, also set it back to RUNNING.
       if (p->state == SLEEPING) {
-        acquire(&tickslock);
+        //acquire(&tickslock);
         p->readytime = ticks;
-        release(&tickslock);
+        //release(&tickslock);
         p->state = RUNNABLE;
       }
     }
