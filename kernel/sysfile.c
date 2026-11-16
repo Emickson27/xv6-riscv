@@ -529,4 +529,209 @@ sys_pipe(void)
   }
   return 0;
 }
-uint64 sys_rename(void) { return -1; }
+
+
+// Helper: check whether target directory dp2 is equal to or inside src directory ip1.
+// Caller holds locks on dp1 and dp2 (and ip1 is valid with ref >= 1).
+static int
+is_descendant(struct inode *ip1, struct inode *dp1, struct inode *dp2)
+{
+  if (dp2 == ip1)
+    return 1;
+  if (dp2->inum == ROOTINO)
+    return 0;
+
+  struct inode *cur = idup(dp2);
+  while (cur->inum != ROOTINO) {
+    struct inode *parent;
+    if (cur != dp1 && cur != dp2) {
+      ilock(cur);
+      parent = dirlookup(cur, "..", 0);
+      iunlock(cur);
+    } else {
+      parent = dirlookup(cur, "..", 0);
+    }
+    iput(cur);
+    if (parent == 0)
+      return 1; // conservative fail on corrupt dir
+    if (parent == ip1) {
+      iput(parent);
+      return 1;
+    }
+    cur = parent;
+  }
+  iput(cur);
+  return 0;
+}
+
+uint64
+sys_rename(void)
+{
+  char oldpath[MAXPATH], newpath[MAXPATH];
+  char oldname[DIRSIZ], newname[DIRSIZ];
+  struct inode *dp1 = 0, *dp2 = 0, *ip1 = 0, *ip2 = 0;
+  uint off1 = 0, off2 = 0;
+  struct dirent de;
+
+  if (argstr(0, oldpath, MAXPATH) < 0 || argstr(1, newpath, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  if ((dp1 = nameiparent(oldpath, oldname)) == 0) {
+    end_op();
+    return -1;
+  }
+  if ((dp2 = nameiparent(newpath, newname)) == 0) {
+    iput(dp1);
+    end_op();
+    return -1;
+  }
+
+  // Cannot rename "." or ".."
+  if (namecmp(oldname, ".") == 0 || namecmp(oldname, "..") == 0 ||
+      namecmp(newname, ".") == 0 || namecmp(newname, "..") == 0) {
+    iput(dp1);
+    iput(dp2);
+    end_op();
+    return -1;
+  }
+
+  // Lock parent directories in ascending inum order to prevent deadlock
+  if (dp1 == dp2) {
+    ilock(dp1);
+  } else if (dp1->inum < dp2->inum) {
+    ilock(dp1);
+    ilock(dp2);
+  } else {
+    ilock(dp2);
+    ilock(dp1);
+  }
+
+  // Look up source entry in dp1
+  if ((ip1 = dirlookup(dp1, oldname, &off1)) == 0)
+    goto bad;
+
+  // Look up destination entry in dp2 (may or may not exist)
+  ip2 = dirlookup(dp2, newname, &off2);
+
+  // Same inode (same name or hard link to same file): no-op, return 0
+  if (ip1 == ip2) {
+    iput(ip1);
+    iput(ip2);
+    if (dp1 != dp2)
+      iunlock(dp2);
+    iunlock(dp1);
+    iput(dp1);
+    iput(dp2);
+    end_op();
+    return 0;
+  }
+
+  // Cannot move a directory directly into itself (rename("d", "d/z"))
+  // or overwrite a parent directory (rename("d/f", "d") or rename("a/b", "d"))
+  if (ip1 == dp2 || ip2 == dp1 || ip2 == dp2) {
+    iput(ip1);
+    if (ip2 != 0)
+      iput(ip2);
+    goto bad;
+  }
+
+  // Lock child inodes in ascending inum order
+  if (ip2 == 0) {
+    ilock(ip1);
+  } else if (ip1->inum < ip2->inum) {
+    ilock(ip1);
+    ilock(ip2);
+  } else {
+    ilock(ip2);
+    ilock(ip1);
+  }
+  // Prevent moving a directory into its own subtree (e.g., rename("a", "a/b/c"))
+  if (ip1->type == T_DIR && is_descendant(ip1, dp1, dp2))
+    goto bad_locked;
+
+  // Validate target type and emptiness if destination already exists
+  if (ip2 != 0) {
+    if (ip1->type == T_DIR && ip2->type != T_DIR)
+      goto bad_locked;
+    if (ip1->type != T_DIR && ip2->type == T_DIR)
+      goto bad_locked;
+    if (ip2->type == T_DIR && !isdirempty(ip2))
+      goto bad_locked;
+  }
+
+  // --- All checks passed: perform atomic modifications ---
+
+  // 1. Add or overwrite entry in dp2 pointing to ip1
+  if (ip2 != 0) {
+    // Overwrite existing dirent at off2 in dp2
+    memset(&de, 0, sizeof(de));
+    de.inum = ip1->inum;
+    strncpy(de.name, newname, DIRSIZ);
+    if (writei(dp2, 0, (uint64)&de, off2, sizeof(de)) != sizeof(de))
+      panic("rename: writei dp2");
+  } else {
+    // Add new entry to dp2
+    if (dirlink(dp2, newname, ip1->inum) < 0)
+      goto bad_locked;
+  }
+
+  // 2. Remove old entry from dp1
+  memset(&de, 0, sizeof(de));
+  if (writei(dp1, 0, (uint64)&de, off1, sizeof(de)) != sizeof(de))
+    panic("rename: writei dp1");
+
+  // 3. Decrement link count on replaced target ip2
+  if (ip2 != 0) {
+    ip2->nlink--;
+    iupdate(ip2);
+  }
+
+  // 4. If moving a directory across different parents, update ".." and parent nlinks
+  if (ip1->type == T_DIR && dp1 != dp2) {
+    uint dotdotoff;
+    struct inode *dotdot = dirlookup(ip1, "..", &dotdotoff);
+    if (dotdot == 0)
+      panic("rename: no ..");
+    iput(dotdot);
+
+    memset(&de, 0, sizeof(de));
+    de.inum = dp2->inum;
+    strncpy(de.name, "..", DIRSIZ);
+    if (writei(ip1, 0, (uint64)&de, dotdotoff, sizeof(de)) != sizeof(de))
+      panic("rename: writei ..");
+
+    dp1->nlink--;
+    iupdate(dp1);
+    dp2->nlink++;
+    iupdate(dp2);
+  }
+
+  if (ip2 != 0)
+    iunlockput(ip2);
+  iunlockput(ip1);
+  if (dp1 != dp2)
+    iunlock(dp2);
+  iunlock(dp1);
+  iput(dp1);
+  iput(dp2);
+  end_op();
+  return 0;
+
+bad_locked:
+  if (ip2 != 0)
+    iunlockput(ip2);
+  iunlockput(ip1);
+bad:
+  if (ip1 != 0 && ip2 == 0) {
+    // ip1 was unlocked in bad: path only if we jumped before ilock(ip1)
+  }
+  if (dp1 != dp2)
+    iunlock(dp2);
+  iunlock(dp1);
+  iput(dp1);
+  iput(dp2);
+  end_op();
+  return -1;
+}
